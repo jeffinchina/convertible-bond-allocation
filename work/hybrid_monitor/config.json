@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "timezone": "Asia/Shanghai",
+  "searchKeyword": "可转换公司债券",
+  "sourceTimeoutSeconds": 35,
+  "sourceRetries": 3,
+  "maxPages": 8,
+  "enrichment": {
+    "cninfoLookbackDays": 800,
+    "requireCompleteRegistrationCalculation": true
+  },
+  "inventory": {
+    "lookbackDays": 370,
+    "fullRefreshDays": 7,
+    "approvalValidityDays": 365
+  },
+  "officialSources": {
+    "sseAnnouncements": "https://query.sse.com.cn/security/stock/queryCompanyBulletin.do",
+    "szseAnnouncements": "https://www.szse.cn/api/disc/announcement/annList",
+    "cninfoAnnouncements": "https://www.cninfo.com.cn/new/hisAnnouncement/query",
+    "csrcSearch": "https://www.csrc.gov.cn/guestweb4/s",
+    "sseCalendar": "https://www.sse.com.cn/disclosure/dealinstruc/closed/",
+    "szseCalendar": "https://www.szse.cn/disclosure/notice/t20251222_618087.html"
+  },
+  "email": {
+    "sendScript": "../Send-QQMail.ps1",
+    "noNewSubject": "【可转债配债】昨日无新公告",
+    "failureSubjectPrefix": "【可转债配债】监控异常："
+  },
+  "eventRunner": "Run-EventAnalysis.ps1"
+}

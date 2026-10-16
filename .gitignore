@@ -1,0 +1,47 @@
+# Local credentials and delivery state
+work/qqmail-config.json
+work/qqmail-sent-log.json
+work/config-window.*.log
+work/hybrid_monitor/state.json
+work/hybrid_monitor/pending_inventory.json
+work/hybrid_monitor/subscription_reminders.json
+work/hybrid_monitor/subscription_reminders.lock
+
+# Generated monitoring evidence and reports
+work/hybrid_monitor/logs/
+work/hybrid_monitor/raw/
+work/hybrid_monitor/reports/
+work/hybrid_monitor/evidence/
+work/bond_analysis_service/reports/
+work/bond_analysis_service/service*.log
+work/tmp/
+outputs/
+tmp/
+
+# Rebuildable runtimes and caches
+work/hybrid_monitor/runtime/node_modules/
+node_modules/
+work/hybrid_monitor/__pycache__/
+work/bond_analysis_service/__pycache__/
+**/__pycache__/
+*.pyc
+
+# Environment files, private keys and credential material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*.json
+*secret*.json
+*token*.json
+*cookie*.json
+cookies.txt
+.credentials/
+
+# Private conversation archives remain local to this project. Only the public
+# policy README is allowed into source control, regardless of future file type.
+docs/conversation-archive/*
+!docs/conversation-archive/README.md

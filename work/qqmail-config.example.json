@@ -1,0 +1,14 @@
+{
+  "smtpServer": "smtp.qq.com",
+  "smtpPort": 587,
+  "useSsl": true,
+  "username": "<local-sender-email>",
+  "from": "<local-sender-email>",
+  "to": [
+    "<local-recipient-email-1>",
+    "<local-recipient-email-2>"
+  ],
+  "encryptedAuthCode": "<generated-locally-by-Configure-QQMail.ps1>",
+  "encryption": "Windows DPAPI CurrentUser",
+  "configuredAt": "<local-timestamp>"
+}
