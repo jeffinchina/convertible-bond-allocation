@@ -329,6 +329,32 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(terms["recordDate"], "2026-09-09")
         self.assertEqual(terms["subscriptionDate"], "2026-09-10")
 
+    def test_flattened_formal_table_keeps_short_names_inside_field_boundaries(self) -> None:
+        issuance_text = (
+            "可转债代码118078可转债简称航亚转债"
+            "可转债扩位简称航亚转债"
+            "原股东配售代码726510原股东配售简称航亚配债"
+            "转债申购代码718510转债申购简称航亚发债"
+            "发行日期及时间2026年10月21日"
+        )
+        prospectus_text = (
+            "本次发行的可转换公司债券简称为‘航亚转债’，债券代码为‘118078’。"
+            "申购简称为‘航亚发债’，申购代码为‘718510’。"
+            "配售简称为‘航亚配债’，配售代码为‘726510’。"
+        )
+        issuance_terms = parse_formal_terms(issuance_text)
+        prospectus_terms = parse_formal_terms(prospectus_text)
+        self.assertEqual(issuance_terms["bondShortName"], "航亚转债")
+        self.assertEqual(issuance_terms["subscriptionShortName"], "航亚发债")
+        self.assertEqual(issuance_terms["allocationShortName"], "航亚配债")
+        merged = merge_formal_term_sets(
+            [
+                {"terms": issuance_terms, "source": {"title": "发行公告"}},
+                {"terms": prospectus_terms, "source": {"title": "募集说明书"}},
+            ]
+        )
+        self.assertEqual(merged["conflicts"], [])
+
     def test_ruihu_formal_issuance_wording_is_parsed(self) -> None:
         text = (
             "本次发行人民币 6.86 亿元可转债，每张面值为人民币 100 元。"
@@ -1130,6 +1156,34 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(len(groups), 1)
         self.assertEqual(groups[0]["crossValidation"]["layer1"], "matched")
         self.assertEqual(groups[0]["crossValidation"]["layer2"], "matched")
+
+    def test_formal_group_prefers_issuance_notice_over_prospectus(self) -> None:
+        records = [
+            Announcement(
+                source="sse",
+                market="SSE",
+                code="688510",
+                company="航亚科技",
+                title="无锡航亚科技股份有限公司向不特定对象发行可转换公司债券募集说明书",
+                date="2026-10-19",
+                url="https://example.test/prospectus.pdf",
+                source_id="prospectus",
+                stage="formal",
+            ),
+            Announcement(
+                source="sse",
+                market="SSE",
+                code="688510",
+                company="航亚科技",
+                title="无锡航亚科技股份有限公司向不特定对象发行可转换公司债券发行公告",
+                date="2026-10-19",
+                url="https://example.test/issuance.pdf",
+                source_id="issuance",
+                stage="formal",
+            ),
+        ]
+        group = group_candidates(records)[0]
+        self.assertEqual(group["primary"]["source_id"], "issuance")
 
 
 if __name__ == "__main__":

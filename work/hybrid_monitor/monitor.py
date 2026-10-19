@@ -843,6 +843,20 @@ def company_matches(record: Announcement, company: str) -> bool:
     return bool(left and right and (left in right or right in left))
 
 
+def formal_document_priority(record: Announcement) -> int:
+    """Prefer the actionable issuance notice over a prospectus within one layer."""
+    if record.stage != "formal":
+        return 0
+    title = normalized_title(record.title)
+    if "发行公告" in title:
+        return 30
+    if "募集说明书" in title:
+        return 20
+    if "发行提示性公告" in title:
+        return 10
+    return 0
+
+
 def group_candidates(records: Iterable[Announcement]) -> list[dict[str, Any]]:
     records = list(records)
     csrc_records = [record for record in records if record.source == "csrc" and record.stage != "none"]
@@ -857,8 +871,18 @@ def group_candidates(records: Iterable[Announcement]) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     matched_csrc: set[str] = set()
     for (key, stage), group in groups.items():
-        primary = next((r for r in group if r.source in ("sse", "szse")), None)
-        cninfo = next((r for r in group if r.source == "cninfo"), None)
+        exchange_records = [r for r in group if r.source in ("sse", "szse")]
+        cninfo_records = [r for r in group if r.source == "cninfo"]
+        primary = (
+            max(exchange_records, key=formal_document_priority)
+            if exchange_records
+            else None
+        )
+        cninfo = (
+            max(cninfo_records, key=formal_document_priority)
+            if cninfo_records
+            else None
+        )
         best = primary or cninfo or group[0]
         company = best.company or company_from_title(best.title)
         csrc = next(
@@ -1319,6 +1343,96 @@ def select_formal_share_snapshot(
     return selected
 
 
+FORMAL_SHORT_NAME_SUFFIXES = {
+    "bondShortName": "转债",
+    "subscriptionShortName": "发债",
+    "allocationShortName": "配债",
+}
+FORMAL_SHORT_NAME_POLLUTION = (
+    "代码",
+    "简称",
+    "扩位",
+    "发行日期",
+    "股权登记日",
+    "申购日",
+    "配售日",
+)
+
+
+def valid_formal_short_name(field: str, value: Any) -> bool:
+    """Reject adjacent PDF table labels accidentally absorbed into a short name."""
+    suffix = FORMAL_SHORT_NAME_SUFFIXES.get(field)
+    cleaned = re.sub(r"\s+", "", clean_text(value)).strip("“”‘’\"'：:，,。；;")
+    return bool(
+        suffix
+        and re.fullmatch(r"[\u4e00-\u9fffA-Za-z0-9]{2,12}", cleaned)
+        and cleaned.endswith(suffix)
+        and not any(token in cleaned for token in FORMAL_SHORT_NAME_POLLUTION)
+    )
+
+
+def parse_formal_short_name(text: str, field: str, label_pattern: str) -> str | None:
+    """Extract a formal short name without crossing flattened PDF table cells."""
+    suffix = FORMAL_SHORT_NAME_SUFFIXES[field]
+    candidates: dict[str, dict[str, int]] = {}
+
+    def add(raw: str, score: int, position: int) -> None:
+        value = re.sub(r"\s+", "", clean_text(raw)).strip("“”‘’\"'：:，,。；;")
+        if not valid_formal_short_name(field, value):
+            return
+        current = candidates.setdefault(
+            value, {"score": score, "count": 0, "position": position}
+        )
+        current["score"] = max(current["score"], score)
+        current["count"] += 1
+        current["position"] = min(current["position"], position)
+
+    # Explicitly quoted values are the strongest evidence and may be separated
+    # from their labels by a PDF line break.
+    quoted = re.compile(
+        rf"{label_pattern}\s*(?:为|：|:)?\s*[“‘\"']\s*"
+        rf"([\u4e00-\u9fffA-Za-z0-9\s]{{2,24}}?{suffix})\s*[”’\"']",
+        re.I,
+    )
+    for match in quoted.finditer(text):
+        add(match.group(1), 30, match.start())
+
+    # Preserve original line boundaries when a table extractor retained them.
+    line_bounded = re.compile(
+        rf"{label_pattern}\s*(?:为|：|:)?\s*"
+        rf"([\u4e00-\u9fffA-Za-z0-9 \t]{{2,24}}?{suffix})"
+        rf"(?=\s*(?:\r?\n|[，,。；;）)]|可转债扩位简称|原股东配售代码|"
+        rf"原股东配售简称|转债申购代码|转债申购简称|发行日期及时间|股权登记日))",
+        re.I,
+    )
+    for match in line_bounded.finditer(text):
+        add(match.group(1), 20, match.start())
+
+    # Some PDF tables lose every whitespace boundary.  A lazy, field-specific
+    # semantic suffix stops at the first complete 转债/发债/配债 value instead
+    # of consuming the following label.
+    compact = re.sub(r"\s+", "", text)
+    compact_pattern = re.compile(
+        rf"{label_pattern}(?:为|：|:)?[“‘\"']?"
+        rf"([\u4e00-\u9fffA-Za-z0-9]{{1,10}}?{suffix})",
+        re.I,
+    )
+    for match in compact_pattern.finditer(compact):
+        add(match.group(1), 10, match.start())
+
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda value: (
+            candidates[value]["score"],
+            candidates[value]["count"],
+            -candidates[value]["position"],
+            -len(value),
+        ),
+    )
+
+
 def parse_formal_terms(text: str) -> dict[str, Any]:
     """Extract deterministic issuance inputs from a formal prospectus/notice."""
     compact = re.sub(r"\s+", "", text)
@@ -1427,25 +1541,28 @@ def parse_formal_terms(text: str) -> dict[str, Any]:
         ),
         "recordDate": record_date,
         "subscriptionDate": subscription_date,
-        "bondShortName": text_value(
-            (
-                r"(?:本次发行的)?(?:可转换公司债券|可转债)(?:的)?简称(?:为|：|:)?[“”‘’\"']?([\u4e00-\u9fffA-Za-z0-9]{2,12})",
-                r"债券简称(?:为|：|:)?[“”‘’\"']?([\u4e00-\u9fffA-Za-z0-9]{2,12})",
-            )
+        "bondShortName": parse_formal_short_name(
+            text,
+            "bondShortName",
+            r"(?:本次发行的)?(?:可转换公司债券|可转债|债券)(?:的)?简称",
         ),
         "bondCode": text_value(
             (
                 r"(?:债券代码|可转债代码)(?:为|：|:)?[“”‘’\"']?(\d{6})",
             )
         ),
-        "subscriptionShortName": text_value(
-            (r"申购简称(?:为|：|:)?[“”‘’\"']?([\u4e00-\u9fffA-Za-z0-9]{2,12})",)
+        "subscriptionShortName": parse_formal_short_name(
+            text,
+            "subscriptionShortName",
+            r"(?:转债|网上)?申购简称",
         ),
         "subscriptionCode": text_value(
             (r"申购代码(?:为|：|:)?[“”‘’\"']?(\d{6})",)
         ),
-        "allocationShortName": text_value(
-            (r"配售简称(?:为|：|:)?[“”‘’\"']?([\u4e00-\u9fffA-Za-z0-9]{2,12})",)
+        "allocationShortName": parse_formal_short_name(
+            text,
+            "allocationShortName",
+            r"(?:原股东)?配售简称",
         ),
         "allocationCode": text_value(
             (r"配售代码(?:为|：|:)?[“”‘’\"']?(\d{6})",)
@@ -2291,6 +2408,10 @@ def enrich_formal_evidence(
     for field in ("subscriptionDate", "bondShortName", "bondCode", "subscriptionCode"):
         if not terms.get(field):
             missing.append(field)
+    for field in FORMAL_SHORT_NAME_SUFFIXES:
+        if terms.get(field) and not valid_formal_short_name(field, terms[field]):
+            missing.append(f"{field}Invalid")
+            warnings.append(f"正式发行简称字段受相邻表格标签污染：{field}")
     if terms.get("conflicts"):
         missing.append("formalTermConflict")
         warnings.append(
@@ -3441,6 +3562,9 @@ def build_subscription_reminder_entry(
         validation_errors.append("formalTermConflict")
     if (terms.get("consistency") or {}).get("status") == "conflict":
         validation_errors.append("allocationConsistency")
+    for field in FORMAL_SHORT_NAME_SUFFIXES:
+        if terms.get(field) and not valid_formal_short_name(field, terms[field]):
+            validation_errors.append(f"{field}Invalid")
     try:
         subscription_date = dt.date.fromisoformat(str(terms.get("subscriptionDate")))
     except (TypeError, ValueError):

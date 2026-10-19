@@ -429,6 +429,26 @@ class SubscriptionReminderTests(unittest.TestCase):
             entry = next(iter(queue["entries"].values()))
             self.assertEqual(entry["subscriptionDate"], "2026-10-21")
 
+    def test_polluted_short_name_fails_closed(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as temp_dir:
+            root = Path(temp_dir)
+            evidence_path = root / "evidence.json"
+            payload = sample_evidence()
+            payload["calculation"]["formalTerms"][
+                "bondShortName"
+            ] = "申菱转债可转债扩位简称申"
+            evidence_path.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+            queue = {"schemaVersion": 1, "entries": {}}
+            result = refresh_subscription_reminder_queue(
+                queue,
+                [evidence_path],
+                dt.datetime(2026, 10, 19, 8, 30, tzinfo=TZ),
+            )
+            self.assertEqual(queue["entries"], {})
+            self.assertIn("bondShortNameInvalid", result["incomplete"][0]["missingFields"])
+
     def test_missing_subscription_code_fails_closed(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as temp_dir:
             evidence_path = Path(temp_dir) / "evidence.json"
