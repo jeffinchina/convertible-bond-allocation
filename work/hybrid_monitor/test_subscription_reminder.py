@@ -449,6 +449,40 @@ class SubscriptionReminderTests(unittest.TestCase):
             self.assertEqual(queue["entries"], {})
             self.assertIn("bondShortNameInvalid", result["incomplete"][0]["missingFields"])
 
+    def test_numbered_bond_short_name_can_enter_queue_and_title(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as temp_dir:
+            evidence_path = Path(temp_dir) / "evidence.json"
+            payload = sample_evidence("2026-10-22")
+            payload["candidate"].update(
+                {"code": "000887", "company": "中鼎股份", "eventKey": "zhongding"}
+            )
+            payload["calculation"]["formalTerms"].update(
+                {
+                    "bondShortName": "中鼎转03",
+                    "bondCode": "127119",
+                    "subscriptionShortName": "中鼎发债",
+                    "subscriptionCode": "070887",
+                    "allocationShortName": "中鼎配债",
+                    "allocationCode": "080887",
+                }
+            )
+            evidence_path.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+            queue = {"schemaVersion": 1, "entries": {}}
+            result = refresh_subscription_reminder_queue(
+                queue,
+                [evidence_path],
+                dt.datetime(2026, 10, 21, 8, 30, tzinfo=TZ),
+            )
+            self.assertEqual(result["addedOrUpdated"], 1)
+            entry = next(iter(queue["entries"].values()))
+            self.assertEqual(entry["bondShortName"], "中鼎转03")
+            self.assertEqual(
+                subscription_reminder_subject(entry),
+                "【可转债申购】请今天申购新债：中鼎转03",
+            )
+
     def test_missing_subscription_code_fails_closed(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as temp_dir:
             evidence_path = Path(temp_dir) / "evidence.json"

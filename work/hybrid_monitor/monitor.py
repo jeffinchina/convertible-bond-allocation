@@ -1343,10 +1343,17 @@ def select_formal_share_snapshot(
     return selected
 
 
-FORMAL_SHORT_NAME_SUFFIXES = {
-    "bondShortName": "转债",
-    "subscriptionShortName": "发债",
-    "allocationShortName": "配债",
+FORMAL_SHORT_NAME_ENDINGS = {
+    # Shenzhen may append an issue sequence to the bond abbreviation instead
+    # of the literal "转债" suffix (for example "中鼎转 03" in a PDF and
+    # "中鼎转03" after whitespace normalization).  Keep the spaced pattern for
+    # original PDF text and the compact pattern for validation/fallback parsing.
+    "bondShortName": {
+        "spaced": r"(?:转\s*债|转\s*\d{1,2})",
+        "compact": r"(?:转债|转\d{1,2})",
+    },
+    "subscriptionShortName": {"spaced": r"发\s*债", "compact": r"发债"},
+    "allocationShortName": {"spaced": r"配\s*债", "compact": r"配债"},
 }
 FORMAL_SHORT_NAME_POLLUTION = (
     "代码",
@@ -1361,19 +1368,24 @@ FORMAL_SHORT_NAME_POLLUTION = (
 
 def valid_formal_short_name(field: str, value: Any) -> bool:
     """Reject adjacent PDF table labels accidentally absorbed into a short name."""
-    suffix = FORMAL_SHORT_NAME_SUFFIXES.get(field)
+    ending = FORMAL_SHORT_NAME_ENDINGS.get(field)
     cleaned = re.sub(r"\s+", "", clean_text(value)).strip("“”‘’\"'：:，,。；;")
     return bool(
-        suffix
-        and re.fullmatch(r"[\u4e00-\u9fffA-Za-z0-9]{2,12}", cleaned)
-        and cleaned.endswith(suffix)
+        ending
+        and re.fullmatch(
+            rf"(?=[\u4e00-\u9fffA-Za-z0-9]{{2,12}}$)"
+            rf"[\u4e00-\u9fffA-Za-z0-9]+{ending['compact']}",
+            cleaned,
+        )
         and not any(token in cleaned for token in FORMAL_SHORT_NAME_POLLUTION)
     )
 
 
 def parse_formal_short_name(text: str, field: str, label_pattern: str) -> str | None:
     """Extract a formal short name without crossing flattened PDF table cells."""
-    suffix = FORMAL_SHORT_NAME_SUFFIXES[field]
+    ending = FORMAL_SHORT_NAME_ENDINGS[field]
+    spaced_ending = ending["spaced"]
+    compact_ending = ending["compact"]
     candidates: dict[str, dict[str, int]] = {}
 
     def add(raw: str, score: int, position: int) -> None:
@@ -1391,7 +1403,7 @@ def parse_formal_short_name(text: str, field: str, label_pattern: str) -> str | 
     # from their labels by a PDF line break.
     quoted = re.compile(
         rf"{label_pattern}\s*(?:为|：|:)?\s*[“‘\"']\s*"
-        rf"([\u4e00-\u9fffA-Za-z0-9\s]{{2,24}}?{suffix})\s*[”’\"']",
+        rf"([\u4e00-\u9fffA-Za-z0-9\s]{{1,24}}?{spaced_ending})\s*[”’\"']",
         re.I,
     )
     for match in quoted.finditer(text):
@@ -1400,7 +1412,7 @@ def parse_formal_short_name(text: str, field: str, label_pattern: str) -> str | 
     # Preserve original line boundaries when a table extractor retained them.
     line_bounded = re.compile(
         rf"{label_pattern}\s*(?:为|：|:)?\s*"
-        rf"([\u4e00-\u9fffA-Za-z0-9 \t]{{2,24}}?{suffix})"
+        rf"([\u4e00-\u9fffA-Za-z0-9 \t]{{1,24}}?{spaced_ending})"
         rf"(?=\s*(?:\r?\n|[，,。；;）)]|可转债扩位简称|原股东配售代码|"
         rf"原股东配售简称|转债申购代码|转债申购简称|发行日期及时间|股权登记日))",
         re.I,
@@ -1414,7 +1426,7 @@ def parse_formal_short_name(text: str, field: str, label_pattern: str) -> str | 
     compact = re.sub(r"\s+", "", text)
     compact_pattern = re.compile(
         rf"{label_pattern}(?:为|：|:)?[“‘\"']?"
-        rf"([\u4e00-\u9fffA-Za-z0-9]{{1,10}}?{suffix})",
+        rf"([\u4e00-\u9fffA-Za-z0-9]{{1,10}}?{compact_ending})",
         re.I,
     )
     for match in compact_pattern.finditer(compact):
@@ -2408,7 +2420,7 @@ def enrich_formal_evidence(
     for field in ("subscriptionDate", "bondShortName", "bondCode", "subscriptionCode"):
         if not terms.get(field):
             missing.append(field)
-    for field in FORMAL_SHORT_NAME_SUFFIXES:
+    for field in FORMAL_SHORT_NAME_ENDINGS:
         if terms.get(field) and not valid_formal_short_name(field, terms[field]):
             missing.append(f"{field}Invalid")
             warnings.append(f"正式发行简称字段受相邻表格标签污染：{field}")
@@ -3562,7 +3574,7 @@ def build_subscription_reminder_entry(
         validation_errors.append("formalTermConflict")
     if (terms.get("consistency") or {}).get("status") == "conflict":
         validation_errors.append("allocationConsistency")
-    for field in FORMAL_SHORT_NAME_SUFFIXES:
+    for field in FORMAL_SHORT_NAME_ENDINGS:
         if terms.get(field) and not valid_formal_short_name(field, terms[field]):
             validation_errors.append(f"{field}Invalid")
     try:

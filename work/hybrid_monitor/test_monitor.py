@@ -355,6 +355,38 @@ class ClassificationTests(unittest.TestCase):
         )
         self.assertEqual(merged["conflicts"], [])
 
+    def test_numbered_szse_bond_short_name_is_normalized_and_merged(self) -> None:
+        issuance_text = (
+            "本次发行的可转债简称为“中鼎转 03”，债券代码为“127119”。"
+            "原股东配售简称为“中鼎配债”，配售代码为“080887”。"
+            "网上申购简称为“中鼎发债”，申购代码为“070887”。"
+        )
+        prospectus_text = (
+            "本次发行的可转换公司债券简称为“中鼎转03”，债券代码为“127119”。"
+        )
+        issuance_terms = parse_formal_terms(issuance_text)
+        prospectus_terms = parse_formal_terms(prospectus_text)
+        self.assertEqual(issuance_terms["bondShortName"], "中鼎转03")
+        self.assertEqual(issuance_terms["subscriptionShortName"], "中鼎发债")
+        self.assertEqual(issuance_terms["allocationShortName"], "中鼎配债")
+        merged = merge_formal_term_sets(
+            [
+                {"terms": issuance_terms, "source": {"title": "发行公告"}},
+                {"terms": prospectus_terms, "source": {"title": "募集说明书"}},
+            ]
+        )
+        self.assertEqual(merged["bondShortName"], "中鼎转03")
+        self.assertEqual(merged["conflicts"], [])
+
+    def test_flattened_numbered_bond_short_names_stop_before_next_label(self) -> None:
+        for short_name in ("中鼎转2", "中鼎转03"):
+            with self.subTest(short_name=short_name):
+                terms = parse_formal_terms(
+                    "可转债代码127119可转债简称"
+                    f"{short_name}可转债扩位简称{short_name}债券代码127119"
+                )
+                self.assertEqual(terms["bondShortName"], short_name)
+
     def test_ruihu_formal_issuance_wording_is_parsed(self) -> None:
         text = (
             "本次发行人民币 6.86 亿元可转债，每张面值为人民币 100 元。"
