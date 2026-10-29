@@ -6,6 +6,7 @@ from pathlib import Path
 SCRIPT_PATH = Path(__file__).with_name("Install-HybridMonitor.ps1")
 RUNNER_PATH = Path(__file__).with_name("Run-HybridMonitor.ps1")
 REMINDER_RUNNER_PATH = Path(__file__).with_name("Run-SubscriptionReminder.ps1")
+LIFECYCLE_RUNNER_PATH = Path(__file__).with_name("Run-BondLifecycleReminder.ps1")
 
 
 class InstallHybridMonitorScriptTests(unittest.TestCase):
@@ -14,6 +15,7 @@ class InstallHybridMonitorScriptTests(unittest.TestCase):
         cls.script = SCRIPT_PATH.read_text(encoding="utf-8")
         cls.runner = RUNNER_PATH.read_text(encoding="utf-8")
         cls.reminder_runner = REMINDER_RUNNER_PATH.read_text(encoding="utf-8")
+        cls.lifecycle_runner = LIFECYCLE_RUNNER_PATH.read_text(encoding="utf-8")
 
     def test_keeps_weekday_0830_trigger_and_adds_current_user_logon_trigger(self):
         self.assertRegex(
@@ -57,6 +59,8 @@ class InstallHybridMonitorScriptTests(unittest.TestCase):
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.script)
+        self.assertIn("-AllowStartIfOnBatteries", self.script)
+        self.assertIn("-DontStopIfGoingOnBatteries", self.script)
 
     def test_scheduled_action_uses_guarded_runner_mode(self):
         self.assertRegex(
@@ -123,6 +127,42 @@ class InstallHybridMonitorScriptTests(unittest.TestCase):
             self.script,
             r"\$reminderSettings\s*=\s*New-ScheduledTaskSettingsSet\b[^\r\n]*"
             r"-StartWhenAvailable\b[^\r\n]*"
+            r"-MultipleInstances\s+IgnoreNew\b[^\r\n]*"
+            r"-RestartCount\s+3\b[^\r\n]*"
+            r"-RestartInterval\s+\(New-TimeSpan -Minutes 10\)",
+        )
+
+    def test_lifecycle_reminder_has_independent_0915_and_logon_triggers(self):
+        self.assertIn("$lifecycleTaskName = '可转债配债-出签上市提醒'", self.script)
+        self.assertRegex(
+            self.script,
+            r"\$lifecycle0915\s*=\s*New-ScheduledTaskTrigger\s+-Weekly\b[^\r\n]*"
+            r"-DaysOfWeek\s+Monday,Tuesday,Wednesday,Thursday,Friday\b[^\r\n]*"
+            r"-At\s+'09:15'",
+        )
+        self.assertRegex(
+            self.script,
+            r"\$lifecycleLogon\s*=\s*New-ScheduledTaskTrigger\s+-AtLogOn\s+-User\s+\$currentUser",
+        )
+        self.assertRegex(
+            self.script,
+            r"Register-ScheduledTask\s+-TaskName\s+\$lifecycleTaskName\b[^\r\n]*"
+            r"-Trigger\s+@\(\$lifecycle0915,\s*\$lifecycleLogon\)",
+        )
+
+    def test_lifecycle_reminder_action_is_independent_and_retry_safe(self):
+        self.assertRegex(
+            self.script,
+            r'\$lifecycleArguments\s*=\s*"-NoProfile -File `"\$lifecycleRunner`" -Scheduled"',
+        )
+        self.assertIn("lifecycle_reminder.py", self.lifecycle_runner)
+        self.assertNotIn("monitor.py", self.lifecycle_runner)
+        self.assertRegex(
+            self.script,
+            r"\$lifecycleSettings\s*=\s*New-ScheduledTaskSettingsSet\b[^\r\n]*"
+            r"-StartWhenAvailable\b[^\r\n]*"
+            r"-AllowStartIfOnBatteries\b[^\r\n]*"
+            r"-DontStopIfGoingOnBatteries\b[^\r\n]*"
             r"-MultipleInstances\s+IgnoreNew\b[^\r\n]*"
             r"-RestartCount\s+3\b[^\r\n]*"
             r"-RestartInterval\s+\(New-TimeSpan -Minutes 10\)",

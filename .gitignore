@@ -6,12 +6,16 @@ work/hybrid_monitor/state.json
 work/hybrid_monitor/pending_inventory.json
 work/hybrid_monitor/subscription_reminders.json
 work/hybrid_monitor/subscription_reminders.lock
+work/hybrid_monitor/bond_lifecycle_reminders.json
+work/hybrid_monitor/bond_lifecycle_reminders.lock
+work/hybrid_monitor/bond_lifecycle_state.json
 
 # Generated monitoring evidence and reports
 work/hybrid_monitor/logs/
 work/hybrid_monitor/raw/
 work/hybrid_monitor/reports/
 work/hybrid_monitor/evidence/
+work/hybrid_monitor/tmp*/
 work/bond_analysis_service/reports/
 work/bond_analysis_service/service*.log
 work/tmp/

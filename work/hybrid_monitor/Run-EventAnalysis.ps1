@@ -11,11 +11,27 @@ if ($null -ne $PSStyle) {
 $root = $PSScriptRoot
 $workspace = (Resolve-Path -LiteralPath (Join-Path $root '..\..')).Path
 $evidence = (Resolve-Path -LiteralPath $EvidencePath).Path
+$configPath = (Resolve-Path -LiteralPath (Join-Path $root 'config.json')).Path
 $promptTemplate = (Resolve-Path -LiteralPath (Join-Path $root 'event-analysis-prompt.md')).Path
 $runtimeCli = Join-Path $root 'runtime\node_modules\@openai\codex\bin\codex.js'
 $outputSchema = (Resolve-Path -LiteralPath (Join-Path $root 'analysis-result-schema.json')).Path
 $resultPath = Join-Path (Split-Path -Parent $evidence) 'analysis-result.json'
 $sendScript = (Resolve-Path -LiteralPath (Join-Path $root '..\Send-QQMail.ps1')).Path
+$config = Get-Content -LiteralPath $configPath -Raw -Encoding utf8 | ConvertFrom-Json
+$analysisConfig = $config.eventAnalysis
+$modelCandidates = @(
+    $analysisConfig.modelCandidates |
+        ForEach-Object { ([string]$_).Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -Unique
+)
+if ($modelCandidates.Count -eq 0) {
+    $modelCandidates = @('gpt-6-astra', 'gpt-5.6-sol')
+}
+$reasoningEffort = ([string]$analysisConfig.reasoningEffort).Trim()
+if ([string]::IsNullOrWhiteSpace($reasoningEffort)) {
+    $reasoningEffort = 'high'
+}
 
 $entry = Get-Content -LiteralPath $evidence -Raw -Encoding utf8 | ConvertFrom-Json
 $evidenceFiles = if ($null -ne $entry.evidencePaths) { @($entry.evidencePaths) } else { @($evidence) }
@@ -78,8 +94,21 @@ foreach ($evidenceFile in $evidenceFiles) {
     $calculationHtmlByCode[$code] = [string]$pack.calculation.html
 }
 
-if (-not (Test-Path -LiteralPath $runtimeCli)) {
-    throw '尚未安装独立 Codex CLI 运行时。请先运行 Install-HybridMonitor.ps1。'
+$globalCli = Get-Command codex.exe -CommandType Application -ErrorAction SilentlyContinue
+if ($null -ne $globalCli) {
+    $codexCommand = $globalCli.Source
+    $codexPrefixArguments = @()
+    $codexLauncher = 'global'
+} elseif (Test-Path -LiteralPath $runtimeCli) {
+    $nodeCommand = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
+    if ($null -eq $nodeCommand) {
+        throw '未找到全局 Codex CLI，且项目内置 Codex CLI 所需的 Node.js 不可用。'
+    }
+    $codexCommand = $nodeCommand.Source
+    $codexPrefixArguments = @($runtimeCli)
+    $codexLauncher = 'bundled'
+} else {
+    throw '未找到可用的 Codex CLI。请先运行 Install-HybridMonitor.ps1。'
 }
 
 $instructions = Get-Content -LiteralPath $promptTemplate -Raw
@@ -90,21 +119,69 @@ $instructions
 请现在完成分析并按要求只输出 JSON。
 "@
 
-$prompt | & node $runtimeCli `
-    --cd $workspace `
-    --sandbox workspace-write `
-    --ask-for-approval never `
-    --search `
-    exec `
-    --skip-git-repo-check `
-    --ephemeral `
-    --output-schema $outputSchema `
-    --output-last-message $resultPath `
-    -
-
-if ($LASTEXITCODE -ne 0) {
-    throw "Codex 事件分析失败，退出码：$LASTEXITCODE"
+function Test-ModelCompatibilityFailure {
+    param([string]$OutputText)
+    # Metadata warnings can accompany unrelated network/quota failures. Only
+    # explicit error lines are allowed to trigger a different model request.
+    $errorLines = @($OutputText -split '\r?\n' | Where-Object {
+        $_ -match '(?i)\bERROR\b'
+    }) -join "`n"
+    return $errorLines -match '(?i)(model_not_found|model[^\r\n]{0,120}(?:not supported|not available)|not supported when using Codex|requires a newer version of Codex)'
 }
+$selectedModel = $null
+$attemptSummaries = @()
+$env:NO_COLOR = '1'
+
+foreach ($model in $modelCandidates) {
+    if (Test-Path -LiteralPath $resultPath) {
+        Remove-Item -LiteralPath $resultPath -Force
+    }
+    $codexArguments = @(
+        $codexPrefixArguments
+        '--model', $model
+        '-c', "model_reasoning_effort=`"$reasoningEffort`""
+        '--cd', $workspace
+        '--sandbox', 'workspace-write'
+        '--ask-for-approval', 'never'
+        '--search'
+        'exec'
+        '--skip-git-repo-check'
+        '--ephemeral'
+        '--output-schema', $outputSchema
+        '--output-last-message', $resultPath
+        '-'
+    )
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $attemptOutput = @($prompt | & $codexCommand @codexArguments 2>&1)
+        $attemptExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    $attemptText = ($attemptOutput | Out-String).Trim()
+    $attemptSummaries += "$model=$attemptExitCode"
+    Write-Output "事件分析模型尝试：$model（$codexLauncher CLI），退出码 $attemptExitCode"
+    if ($attemptExitCode -eq 0 -and (Test-Path -LiteralPath $resultPath)) {
+        $selectedModel = $model
+        break
+    }
+
+    $modelCompatibilityFailure = Test-ModelCompatibilityFailure -OutputText $attemptText
+    if (-not $modelCompatibilityFailure) {
+        $detail = if ($attemptText.Length -gt 3000) {
+            $attemptText.Substring($attemptText.Length - 3000)
+        } else {
+            $attemptText
+        }
+        throw "Codex 事件分析失败（模型 $model，退出码 $attemptExitCode）：$detail"
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($selectedModel)) {
+    throw "Codex 事件分析没有兼容模型（$($attemptSummaries -join '；')）。请更新 Codex CLI 或调整 config.json 的 eventAnalysis.modelCandidates。"
+}
+Write-Output "事件分析采用模型：$selectedModel（reasoning=$reasoningEffort）"
 
 $rawResult = Get-Content -LiteralPath $resultPath -Raw -Encoding utf8
 $result = $rawResult | ConvertFrom-Json
