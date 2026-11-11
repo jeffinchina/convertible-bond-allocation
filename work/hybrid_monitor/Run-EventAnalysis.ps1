@@ -94,13 +94,15 @@ foreach ($evidenceFile in $evidenceFiles) {
     $calculationHtmlByCode[$code] = [string]$pack.calculation.html
 }
 
-$globalCli = Get-Command codex.exe -CommandType Application -ErrorAction SilentlyContinue
+# Get-Command can return one executable for every matching PATH directory.
+# The invocation operator needs one scalar path, never an array of paths.
+$globalCli = Get-Command codex.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($null -ne $globalCli) {
     $codexCommand = $globalCli.Source
     $codexPrefixArguments = @()
     $codexLauncher = 'global'
 } elseif (Test-Path -LiteralPath $runtimeCli) {
-    $nodeCommand = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
+    $nodeCommand = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($null -eq $nodeCommand) {
         throw '未找到全局 Codex CLI，且项目内置 Codex CLI 所需的 Node.js 不可用。'
     }

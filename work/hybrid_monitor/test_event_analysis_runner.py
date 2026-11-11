@@ -33,6 +33,40 @@ class EventAnalysisRunnerTests(unittest.TestCase):
         self.assertIn('model_reasoning_effort=', self.script)
         self.assertNotIn("$prompt | & node $runtimeCli", self.script)
 
+    def test_multiple_path_matches_select_one_global_or_node_executable(self):
+        # Execute the real selection block under mocked PATH discovery. No
+        # model, mail, or real executable is invoked by this regression.
+        script_path = str(RUNNER.resolve()).replace("'", "''")
+        command = f"""
+$code = Get-Content -LiteralPath '{script_path}' -Raw -Encoding utf8
+$start = $code.IndexOf('$globalCli = Get-Command codex.exe')
+$end = $code.IndexOf('$instructions = Get-Content', $start)
+$selectRuntime = [scriptblock]::Create($code.Substring($start, $end - $start))
+$runtimeCli = '{script_path}'
+function Get-Command {{
+    param($Name, $CommandType, $ErrorAction)
+    if ($Name -eq 'codex.exe') {{
+        foreach ($source in $script:mockGlobalSources) {{ [pscustomobject]@{{Source=$source}} }}
+    }} else {{
+        foreach ($source in @('C:\\Fixture Path\\node-a.exe', 'C:\\Second Runtime\\node-b.exe')) {{ [pscustomobject]@{{Source=$source}} }}
+    }}
+}}
+$script:mockGlobalSources = @('C:\\First App\\codex.exe', 'C:\\Other App\\codex.exe')
+. $selectRuntime
+$results = @([pscustomobject]@{{launcher=$codexLauncher;command=$codexCommand;scalar=($codexCommand -is [string]);prefixCount=@($codexPrefixArguments).Count}})
+$script:mockGlobalSources = @()
+. $selectRuntime
+$results += [pscustomobject]@{{launcher=$codexLauncher;command=$codexCommand;scalar=($codexCommand -is [string]);prefixCount=@($codexPrefixArguments).Count}}
+$results | ConvertTo-Json -Compress
+"""
+        result = subprocess.run(
+            ["pwsh.exe", "-NoProfile", "-Command", command],
+            capture_output=True, text=True, encoding="utf-8", check=True,
+        )
+        rows = json.loads(result.stdout)
+        self.assertEqual(rows[0], {"launcher": "global", "command": r"C:\First App\codex.exe", "scalar": True, "prefixCount": 0})
+        self.assertEqual(rows[1], {"launcher": "bundled", "command": r"C:\Fixture Path\node-a.exe", "scalar": True, "prefixCount": 1})
+
     def test_fallback_is_limited_to_model_compatibility_errors(self):
         for marker in (
             "model_not_found",
