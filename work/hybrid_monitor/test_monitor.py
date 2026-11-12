@@ -1,3 +1,4 @@
+import copy
 import datetime as dt
 import gzip
 import json
@@ -602,6 +603,97 @@ class ClassificationTests(unittest.TestCase):
             conflict["alternatives"][0]["source"]["url"], "https://example.test/b.pdf"
         )
 
+    def allocation_role_documents(self) -> list[dict]:
+        identity = {
+            "bondCode": "111027", "bondShortName": "百龙转债",
+            "subscriptionCode": "713016", "subscriptionDate": "2026-11-16",
+            "recordDate": "2026-11-13",
+        }
+        return [
+            {"source": {"source": "sse", "date": "2026-11-12",
+                        "title": "百龙创园向不特定对象发行可转换公司债券发行公告",
+                        "url": "https://static.sse.com.cn/issuance.pdf"},
+             "terms": {**identity, "allocationCode": "715016"}},
+            {"source": {"source": "sse", "date": "2026-11-12",
+                        "title": "百龙创园可转换公司债券募集说明书",
+                        "url": "https://static.sse.com.cn/prospectus.pdf"},
+             "terms": {**identity, "allocationCode": "111027"}},
+        ]
+
+    def test_allocation_bond_role_collision_is_audited_independent_of_order(self) -> None:
+        for documents in (self.allocation_role_documents(), self.allocation_role_documents()[::-1]):
+            with self.subTest(first=documents[0]["source"]["title"]):
+                merged = merge_formal_term_sets(documents)
+                self.assertEqual(merged["allocationCode"], "715016")
+                self.assertEqual(merged["conflicts"], [])
+                audit = merged["resolvedConflicts"][0]
+                self.assertEqual(audit["alternatives"][0]["value"], "111027")
+                rejected = next(item for item in documents if item["terms"]["allocationCode"] == "111027")
+                self.assertEqual(audit["alternatives"][0]["source"]["url"], rejected["source"]["url"])
+                self.assertEqual(merged["fieldSources"]["allocationCode"], audit["acceptedSources"])
+                self.assertIn("券商页面", audit["warning"])
+
+    def test_prospectus_without_bond_labels_requires_issuer_and_issue_match(self) -> None:
+        documents = self.allocation_role_documents()
+        for index, item in enumerate(documents):
+            item["source"]["url"] = f"https://static.sse.com.cn/605016_20261112_{index}.pdf"
+            item["terms"].update(finalAmount={"valueYuan": 748149000}, shareSnapshot={"value": 420012320}, initialConversionPrice=19.42)
+        del documents[1]["terms"]["bondCode"]
+        del documents[1]["terms"]["bondShortName"]
+        self.assertEqual(merge_formal_term_sets(documents)["conflicts"], [])
+        without_price = copy.deepcopy(documents)
+        del without_price[1]["terms"]["initialConversionPrice"]
+        self.assertEqual(merge_formal_term_sets(without_price)["conflicts"], [])
+        for section, field, value in (
+            ("source", "url", "https://static.sse.com.cn/600001_20261112_1.pdf"),
+            ("terms", "finalAmount", {"valueYuan": 748148000}),
+            ("terms", "initialConversionPrice", 19.43),
+            ("terms", "shareSnapshot", {"value": 420012321}),
+            ("terms", "recordDate", None),
+            ("terms", "subscriptionDate", None),
+        ):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(documents)
+                changed[1][section][field] = value
+                merged = merge_formal_term_sets(changed)
+                self.assertIn("allocationCode", [item["field"] for item in merged["conflicts"]])
+
+    def test_allocation_collision_does_not_override_ambiguous_or_untrusted_evidence(self) -> None:
+        cases = [
+            (1, "terms", "allocationCode", "715099"),
+            (1, "terms", "bondCode", "111028"),
+            (1, "terms", "bondShortName", "其他转债"),
+            (0, "terms", "bondCode", ""),
+            (0, "terms", "subscriptionCode", ""),
+            (0, "terms", "allocationCode", "713016"),
+            (1, "terms", "subscriptionDate", "2026-11-17"),
+            (1, "source", "date", "2026-11-13"),
+            (0, "source", "url", "https://static.sse.com.cn.evil.test/notice.pdf"),
+            (1, "source", "url", "http://static.sse.com.cn/prospectus.pdf"),
+            (1, "source", "source", "cninfo"),
+            (1, "source", "title", "百龙创园发行公告"),
+        ]
+        for index, section, field, value in cases:
+            with self.subTest(index=index, field=field, value=value):
+                documents = self.allocation_role_documents()
+                documents[index][section][field] = value
+                merged = merge_formal_term_sets(documents)
+                self.assertEqual(merged["resolvedConflicts"], [])
+                self.assertIn("allocationCode", [item["field"] for item in merged["conflicts"]])
+        documents = self.allocation_role_documents()
+        third = copy.deepcopy(documents[0])
+        third["terms"]["allocationCode"] = "715099"
+        merged = merge_formal_term_sets(documents + [third])
+        self.assertIn("allocationCode", [item["field"] for item in merged["conflicts"]])
+
+    def test_resolved_allocation_does_not_clear_other_field_conflicts(self) -> None:
+        documents = self.allocation_role_documents()
+        documents[0]["terms"]["initialConversionPrice"] = 19.42
+        documents[1]["terms"]["initialConversionPrice"] = 19.50
+        merged = merge_formal_term_sets(documents)
+        self.assertEqual([item["field"] for item in merged["conflicts"]], ["initialConversionPrice"])
+        self.assertEqual(len(merged["resolvedConflicts"]), 1)
+
     def test_supplemental_formal_records_orders_and_deduplicates_semantic_types(self) -> None:
         candidate = {
             "primary": {
@@ -734,6 +826,7 @@ class ClassificationTests(unittest.TestCase):
                 "recordDate": "2026-09-09",
                 "subscriptionDate": "2026-09-10",
                 "shareSnapshot": {"asOfDate": "2026-06-30"},
+                "resolvedConflicts": merge_formal_term_sets(self.allocation_role_documents())["resolvedConflicts"],
             },
             {
                 "latestCloseDate": "2026-09-07",
@@ -758,6 +851,10 @@ class ClassificationTests(unittest.TestCase):
         self.assertIn("正式发行文件", html)
         self.assertIn("最新已完成交易日收盘价 S", html)
         self.assertNotIn("公告日前一交易日收盘价 S", html)
+        self.assertIn('data-generated="formal-term-warning"', html)
+        self.assertIn("债券代码 111027", html)
+        self.assertIn("配售代码 715016", html)
+        self.assertIn('href="https://static.sse.com.cn/issuance.pdf"', html)
         self.assertLess(html.index("行业｜主营业务"), html.index("最终发行规模"))
 
     def test_cninfo_timestamp_is_beijing_date(self) -> None:

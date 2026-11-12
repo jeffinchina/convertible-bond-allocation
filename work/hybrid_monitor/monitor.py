@@ -1612,6 +1612,93 @@ FORMAL_TERM_FIELDS = (
 )
 
 
+def resolve_allocation_role_collision(
+    documents: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Resolve only a prospectus reusing the confirmed bond code for allocation.
+
+    This is not a general source-priority override: both documents must identify
+    the same bond on the same day and come from the same official exchange.
+    """
+    entries = [item for item in documents if (item.get("terms") or {}).get("allocationCode")]
+    if len(entries) < 2:
+        return None
+    notices = [
+        item for item in entries
+        if normalized_title((item.get("source") or {}).get("title") or "").endswith("发行公告")
+    ]
+    if not notices:
+        return None
+    primary = notices[0]
+    expected = primary["terms"]
+    origin = primary.get("source") or {}
+    exchange = origin.get("source")
+    domain = {"sse": "sse.com.cn", "szse": "szse.cn"}.get(exchange)
+    bond_code = str(expected.get("bondCode") or "")
+    allocation_code = str(expected.get("allocationCode") or "")
+    if (
+        not domain or not origin.get("date") or not expected.get("bondShortName")
+        or not re.fullmatch(r"\d{6}", bond_code)
+        or not re.fullmatch(r"\d{6}", str(expected.get("subscriptionCode") or ""))
+        or not re.fullmatch(r"\d{6}", allocation_code)
+        or allocation_code in (bond_code, expected.get("subscriptionCode"))
+    ):
+        return None
+    rejected = []
+    accepted = []
+    for item in entries:
+        terms = item["terms"]
+        source = item.get("source") or {}
+        url = urllib.parse.urlparse(source.get("url") or "")
+        host = url.hostname or ""
+        if (
+            source.get("source") != exchange or source.get("date") != origin["date"]
+            or url.scheme != "https" or not (host == domain or host.endswith("." + domain))
+            or (terms.get("bondCode") and terms["bondCode"] != bond_code)
+            or (terms.get("bondShortName") and terms["bondShortName"] != expected["bondShortName"])
+            or any(terms.get(key) and expected.get(key) and terms[key] != expected[key]
+                   for key in ("subscriptionCode", "recordDate", "subscriptionDate"))
+        ):
+            return None
+        if not terms.get("bondCode") or not terms.get("bondShortName"):
+            # Prospectuses can precede code assignment. Confirm the issuer from
+            # both exchange attachment names plus the issue's dated economics.
+            issuer = re.search(r"/(\d{6})_\d{8}_", urllib.parse.urlparse(origin.get("url") or "").path)
+            other_issuer = re.search(r"/(\d{6})_\d{8}_", url.path)
+            if (
+                not issuer or not other_issuer or issuer[1] != other_issuer[1]
+                or (terms.get("initialConversionPrice") and expected.get("initialConversionPrice")
+                    and terms["initialConversionPrice"] != expected["initialConversionPrice"])
+                or not (terms.get("finalAmount") or {}).get("valueYuan")
+                or terms["finalAmount"]["valueYuan"] != (expected.get("finalAmount") or {}).get("valueYuan")
+                or not (terms.get("shareSnapshot") or {}).get("value")
+                or terms["shareSnapshot"]["value"] != (expected.get("shareSnapshot") or {}).get("value")
+                or any(not terms.get(key) or terms[key] != expected.get(key)
+                       for key in ("recordDate", "subscriptionDate"))
+            ):
+                return None
+        value = str(terms["allocationCode"])
+        title = normalized_title(source.get("title") or "")
+        if value == allocation_code:
+            accepted.append(dict(source))
+        elif value == bond_code and "募集说明书" in title and not title.endswith("发行公告"):
+            rejected.append({"value": value, "source": dict(source)})
+        else:
+            return None
+    if not rejected:
+        return None
+    return {
+        "field": "allocationCode", "chosen": allocation_code,
+        "chosenSource": dict(origin), "acceptedSources": accepted,
+        "alternatives": rejected, "rule": "prospectus_allocation_equals_bond_code",
+        "warning": (
+            f"官方文件代码差异：募集说明书将配售代码写为债券代码 {bond_code}，"
+            f"本报告按同日交易所发行公告采用配售代码 {allocation_code}。"
+            "申购、配售是不同操作，下单前请核对券商页面及后续更正公告。"
+        ),
+    }
+
+
 def merge_formal_term_sets(documents: list[dict[str, Any]]) -> dict[str, Any]:
     """Merge independently parsed official documents with field-level provenance."""
     merged: dict[str, Any] = {}
@@ -1672,6 +1759,15 @@ def merge_formal_term_sets(documents: list[dict[str, Any]]) -> dict[str, Any]:
                 }
             )
 
+    resolved_conflicts = []
+    if any(item["field"] == "allocationCode" for item in conflicts):
+        resolution = resolve_allocation_role_collision(documents)
+        if resolution:
+            merged["allocationCode"] = resolution["chosen"]
+            field_sources["allocationCode"] = resolution["acceptedSources"]
+            conflicts = [item for item in conflicts if item["field"] != "allocationCode"]
+            resolved_conflicts.append(resolution)
+
     amount = (merged.get("finalAmount") or {}).get("valueYuan")
     shares = (merged.get("shareSnapshot") or {}).get("value")
     allocation = merged.get("allocationPerShare")
@@ -1691,6 +1787,7 @@ def merge_formal_term_sets(documents: list[dict[str, Any]]) -> dict[str, Any]:
             "consistency": consistency,
             "fieldSources": field_sources,
             "conflicts": conflicts,
+            "resolvedConflicts": resolved_conflicts,
             "documentCount": len(documents),
             "documents": [dict(item.get("source") or {}) for item in documents],
         }
@@ -2316,8 +2413,14 @@ def formal_calculation_html(
     )
     record_date = terms.get("recordDate") or "以正式文件为准"
     subscription_date = terms.get("subscriptionDate") or "以正式文件为准"
+    term_warnings = "".join(
+        f'<p data-generated="formal-term-warning"><strong>{escape(item["warning"])}</strong>'
+        f' <a href="{escape(item["chosenSource"]["url"])}">发行公告依据</a></p>'
+        for item in terms.get("resolvedConflicts") or []
+    )
     return f"""<section data-generated="formal-calculation" data-calculation-code="{escape(code)}">
 <h3>关键数据与计算（脚本取数并校验）</h3>
+{term_warnings}
 <table border="1" cellspacing="0" cellpadding="6">
 <tr><th>项目</th><th>数值</th><th>口径与日期</th></tr>
 <tr><td>行业｜主营业务</td><td>{escape(company_profile['industry'])}<br>{escape(company_profile['mainBusiness'])}</td><td>{escape(company_profile['mainBusinessReportDate'])} 最新披露主营构成；每项不超过10字</td></tr>
@@ -2383,6 +2486,7 @@ def enrich_formal_evidence(
                 f"正式发行文件解析失败：{document.get('title') or document_path.name}；{exc}"
             )
     terms = merge_formal_term_sets(parsed_documents) if parsed_documents else {}
+    warnings.extend(item["warning"] for item in terms.get("resolvedConflicts") or [])
     if not parsed_documents:
         warnings.append("正式发行文件未成功下载")
     amount = (terms.get("finalAmount") or {}).get("valueYuan")
